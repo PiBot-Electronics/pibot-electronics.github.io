@@ -5,8 +5,7 @@
       "name": "Pibot CNC pendant V4.0 (FluidNC)",
       "enabled": true,
       "description": {
-        "en": "Control your FluidNC CNC using bluetooth or serial connection. Professional wireless pendant with jog control, feed rate override, and real-time status display.",
-        "fr": "Contrôlez votre CNC FluidNC avec bluetooth ou connection série. Pendentif sans fil professionnel avec contrôle jog, override vitesse et affichage temps réel."
+        "en": "Control your FluidNC CNC using bluetooth or serial connection. Professional wireless pendant with jog control, feed rate override, and real-time status display."
       },
       "version": "1.0.0",
       "firmware": [
