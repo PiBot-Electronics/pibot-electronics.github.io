@@ -9,7 +9,7 @@
       },
       "version": "1.0.0",
       "firmware": [
-        { "path": "fluidnc/fluiddial1000000.bin", "offset": "0x0" },
+        { "path": "fluidnc/fluiddial1000000.bin", "offset": "0x0" }
       ],
       "image": "images/pibot_cnc_pendant_4.0.png",
       "icon": "images/fluidnc.svg",
