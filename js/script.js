@@ -581,7 +581,7 @@ function selectProject(project) {
     const consoleContainer = document.getElementById('consoleContainer');
     consoleContainer.innerHTML = '';
     addLog(`Project selected: ${project.name}`, 'info');
-    addLog('Ready to flash. Click "Connect & Flash ESP32" when ready.', 'warning');
+    addLog('Ready to flash. Click "Connect & Flash PiBot device" when ready.', 'warning');
 }
 
 // ===== ESPLoader.js Flash Functions =====
@@ -627,7 +627,7 @@ async function flashESP32() {
         currentStage = 'connecting';
         port = await navigator.serial.requestPort();
         addLog('✅ Port selected', 'success');
-        updateProgress(5, 'Port selected', 'Connecting to ESP32...');
+        updateProgress(5, 'Port selected', 'Connecting to PiBot device...');
         
         // NOW show BOOT modal - user needs to hold BOOT for connection
         showBootModal();
@@ -676,7 +676,7 @@ async function flashESP32() {
         
         addLog(`✅ Connected to ${chip}!`, 'success');
         addLog('👍 You can release the BOOT button now', 'success');
-        updateProgress(15, 'Connected!', 'ESP32 detected successfully');
+        updateProgress(15, 'Connected!', 'PiBot device detected successfully');
         
         // Step 6: Prepare firmware files
         currentStage = 'downloading';
@@ -954,7 +954,7 @@ async function initialize() {
     // Load flash counts and display badges
     loadFlashCounts();
     
-    addLog('ESP32 Web Installer ready (ESPLoader.js)', 'success');
+    addLog('Pibot Web Installer ready (ESPLoader.js)', 'success');
 }
 
 // Start when DOM is ready
