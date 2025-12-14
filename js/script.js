@@ -934,7 +934,6 @@ async function initialize() {
     
     // Load both language files
     await loadTranslations('en');
-    await loadTranslations('fr');
     
     // Set initial language
     const savedLang = localStorage.getItem('language') || 'en';
