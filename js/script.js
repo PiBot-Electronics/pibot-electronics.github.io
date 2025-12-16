@@ -1,6 +1,8 @@
 // ESP32 Web Installer - ESPLoader.js Version
 // Full control over UI/UX, no Shadow DOM, no imposed dialogs
 
+const WEBINSTALLER_VERSION = "2.0.0"; // Version with multilingual audio support
+
 let currentLang = 'en';
 let config = null;
 let pageConfig = null;
@@ -8,6 +10,121 @@ let selectedProject = null;
 let translations = {}; // Will be loaded from lang files
 let esploader = null; // ESPLoader instance
 let port = null; // Serial port
+let firstUserInteractionDone = false; // Track first click for browser check audio
+let browserErrorSoundPlayed = false; // Track if browser error sound already played
+
+// Audio queue system to prevent sound overlap
+let audioQueue = [];
+let isPlayingAudio = false;
+
+// Process audio queue
+async function processAudioQueue() {
+    if (isPlayingAudio || audioQueue.length === 0) {
+        return;
+    }
+    
+    isPlayingAudio = true;
+    const { soundPath, volume, event } = audioQueue.shift();
+    
+    // Log what's playing
+    console.log(`🔊 Playing audio: ${event} | Path: ${soundPath} | Volume: ${volume} | Queue remaining: ${audioQueue.length}`);
+    
+    try {
+        const audio = new Audio(soundPath);
+        audio.volume = volume;
+        
+        // Wait for audio to finish playing
+        await new Promise((resolve, reject) => {
+            audio.onended = () => {
+                console.log(`✅ Finished audio: ${event}`);
+                resolve();
+            };
+            audio.onerror = reject;
+            audio.play().catch(reject);
+        });
+    } catch (error) {
+        console.log(`❌ Could not play audio for ${event}:`, error);
+    }
+    
+    isPlayingAudio = false;
+    
+    // Process next sound in queue
+    if (audioQueue.length > 0) {
+        processAudioQueue();
+    }
+}
+
+// Unified audio feedback system with verbosity levels
+// Plays audio at different stages of the flash process based on verbosity setting
+function playAudioFeedback(event) {
+    // Check if audio feedback is enabled
+    if (!pageConfig?.audio_feedback?.enabled) {
+        return;
+    }
+    
+    const verbosity = pageConfig.audio_feedback.verbosity || 'normal';
+    const volume = pageConfig.audio_feedback.volume || 0.7;
+    const events = pageConfig.audio_feedback.events || {};
+    
+    // Define verbosity levels - which events play at each level
+    const verbosityLevels = {
+        minimal: ['start', 'success', 'error'],
+        normal: ['start', 'boot_prompt', 'connected', 'erasing', 'flashing_start', 'success', 'error'],
+        verbose: ['start', 'dialog_open', 'port_selected', 'boot_prompt', 'connecting', 'connected', 
+                  'erasing', 'erase_complete', 'flashing_start', 'flashing_progress', 
+                  'writing_complete', 'rebooting', 'success', 'error']
+    };
+    
+    // Check if this event should play at current verbosity level
+    const allowedEvents = verbosityLevels[verbosity] || verbosityLevels.normal;
+    if (!allowedEvents.includes(event) && !event.startsWith('error_')) {
+        return;
+    }
+    
+    // Get sound path for this event
+    let soundPath = events[event];
+    
+    // If event is an error category, check for specific error sound
+    if (event.startsWith('error_')) {
+        const category = event.replace('error_', '');
+        soundPath = events[`error_${category}`] || events.error || 'sounds/error.mp3';
+    }
+    
+    // Trim whitespace and check if sound path is valid
+    if (soundPath && typeof soundPath === 'string') {
+        soundPath = soundPath.trim();
+    }
+    
+    // If no sound configured or empty string, skip
+    if (!soundPath || soundPath === "") {
+        return;
+    }
+    
+    // Replace [lang] placeholder with current language code
+    if (soundPath.includes('[lang]')) {
+        const langCode = currentLang || 'en'; // Fallback to 'en' if not set
+        soundPath = soundPath.split('[lang]').join(langCode); // Simple string replacement
+        console.log(`Audio path resolved: ${soundPath} (language: ${langCode})`);
+    }
+    
+    // Add to queue instead of playing immediately
+    audioQueue.push({ soundPath, volume, event });
+    processAudioQueue();
+}
+
+// Legacy function wrappers for backward compatibility
+function playCongratulationsSound() {
+    playAudioFeedback('success');
+}
+
+function playStartSound() {
+    playAudioFeedback('start');
+}
+
+function playErrorSound(errorMessage) {
+    const category = categorizeError(errorMessage);
+    playAudioFeedback(`error_${category}`);
+}
 
 // Flash event logging to server
 // Called ONLY at the very end of flash process (after reset + port close)
@@ -539,6 +656,28 @@ function selectProject(project) {
         return;
     }
     
+    // Check browser compatibility FIRST - if not supported, don't allow selection
+    if (!navigator.serial) {
+        // Play error sound on first click
+        if (!firstUserInteractionDone) {
+            firstUserInteractionDone = true;
+            console.log('%c⚠️ Browser not supported - Web Serial API not available', 'color: #ff5555; font-weight: bold;');
+            playAudioFeedback('error_wrong_browser');
+        }
+        
+        // Show warning in console but don't select project
+        const consoleContainer = document.getElementById('consoleContainer');
+        consoleContainer.innerHTML = '';
+        addLog('⚠️ Browser not supported. Please use Chrome, Edge, or Opera.', 'error');
+        addLog('Web Serial API is required for flashing ESP32 devices.', 'warning');
+        
+        // Hide flash section
+        document.getElementById('flashSection').classList.remove('active');
+        document.getElementById('flashInstruction').classList.remove('active');
+        
+        return; // Don't proceed with project selection
+    }
+    
     selectedProject = project;
     
     // Update UI - remove all selected classes first
@@ -581,7 +720,7 @@ function selectProject(project) {
     const consoleContainer = document.getElementById('consoleContainer');
     consoleContainer.innerHTML = '';
     addLog(`Project selected: ${project.name}`, 'info');
-    addLog('Ready to flash. Click "Connect & Flash PiBot device" when ready.', 'warning');
+    addLog('Ready to flash. Click "Connect & Flash ESP32" when ready.', 'warning');
 }
 
 // ===== ESPLoader.js Flash Functions =====
@@ -598,18 +737,18 @@ async function startFlash() {
         toggleConsole();
     }
     
-    // Disable flash button during process
+    // Hide flash button during process (cleaner than disabled state)
     const flashBtn = document.getElementById('flashButton');
-    flashBtn.disabled = true;
-    flashBtn.textContent = translate('connecting') || 'Connecting...';
+    flashBtn.style.display = 'none';
+    
+    // Play start sound
+    playStartSound();
     
     try {
         await flashESP32();
-        flashBtn.textContent = translate('flashButton');
-        flashBtn.disabled = false;
+        flashBtn.style.display = 'block'; // Show button again
     } catch (error) {
-        flashBtn.textContent = translate('flashButton');
-        flashBtn.disabled = false;
+        flashBtn.style.display = 'block'; // Show button again on error
     }
 }
 
@@ -622,15 +761,24 @@ async function flashESP32() {
     addLog('🔌 Requesting serial port access...', 'info');
     addLog('⚠️ Browser will ask you to select a COM port', 'warning');
     
+    // Audio: Dialog opening
+    playAudioFeedback('dialog_open');
+    
     try {
         // Step 1: Request port from user (NO modal yet - let user select port first)
         currentStage = 'connecting';
         port = await navigator.serial.requestPort();
         addLog('✅ Port selected', 'success');
-        updateProgress(5, 'Port selected', 'Connecting to PiBot device...');
+        updateProgress(5, 'Port selected', 'Connecting to ESP32...');
+        
+        // Audio: Port selected
+        playAudioFeedback('port_selected');
         
         // NOW show BOOT modal - user needs to hold BOOT for connection
         showBootModal();
+        
+        // Audio: Boot button prompt
+        playAudioFeedback('boot_prompt');
         
         // Step 2: Create transport (don't open port yet - ESPLoader will do it)
         const transport = new esptooljs.Transport(port);
@@ -669,6 +817,9 @@ async function flashESP32() {
         addLog('⚠️ HOLD the BOOT button NOW until you see "Connected"!', 'warning');
         updateProgress(10, 'Connecting...', 'Hold BOOT button now!');
         
+        // Audio: Connecting
+        playAudioFeedback('connecting');
+        
         const chip = await esploader.main();
         
         // Close modal on successful connection
@@ -676,7 +827,10 @@ async function flashESP32() {
         
         addLog(`✅ Connected to ${chip}!`, 'success');
         addLog('👍 You can release the BOOT button now', 'success');
-        updateProgress(15, 'Connected!', 'PiBot device detected successfully');
+        updateProgress(15, 'Connected!', 'ESP32 detected successfully');
+        
+        // Audio: Connected successfully
+        playAudioFeedback('connected');
         
         // Step 6: Prepare firmware files
         currentStage = 'downloading';
@@ -693,6 +847,9 @@ async function flashESP32() {
         addLog('🗑️ Erasing flash memory...', 'info');
         updateProgress(20, 'Erasing flash...', 'This may take a few seconds');
         
+        // Audio: Erasing flash
+        playAudioFeedback('erasing');
+        
         // Calculate total bytes for progress
         totalBytes = fileArray.reduce((sum, file) => sum + file.data.length, 0);
         writtenBytes = 0;
@@ -706,6 +863,10 @@ async function flashESP32() {
             updateProgress(20, 'Erasing all flash...', 'This may take 10-15 seconds');
         }
         
+        let flashingStartAudioPlayed = false;  // Flag to play audio only once
+        let eraseCompleteAudioPlayed = false;  // Flag for erase complete audio
+        let lastProgressMilestone = -1;  // Track last milestone played (-1 = none, 0 = 25%, 1 = 50%, 2 = 75%)
+        
         await esploader.writeFlash({
             fileArray: fileArray,
             flashSize: "keep",
@@ -716,10 +877,36 @@ async function flashESP32() {
             reportProgress: (fileIndex, written, total) => {
                 const percent = Math.floor((written / total) * 100);
                 
+                // Audio: Erase complete (only once, when writing actually starts)
+                if (!eraseCompleteAudioPlayed && fileIndex === 0 && written > 0) {
+                    playAudioFeedback('erase_complete');
+                    eraseCompleteAudioPlayed = true;
+                }
+                
+                // Audio: Flashing start (right after erase complete)
+                if (!flashingStartAudioPlayed && fileIndex === 0 && written > 0) {
+                    playAudioFeedback('flashing_start');
+
+                    flashingStartAudioPlayed = true;
+                }
+                
                 // Update global progress
                 writtenBytes = fileArray.slice(0, fileIndex).reduce((sum, f) => sum + f.data.length, 0) + written;
                 const globalPercent = calculateGlobalProgress();
                 updateProgress(globalPercent, 'Writing firmware...', `File ${fileIndex + 1}/${fileArray.length} - ${percent}%`);
+                
+                // Audio: Progress milestones based on GLOBAL progress (25%, 50%, 75%)
+                // Only play each milestone once
+                if (globalPercent >= 75 && lastProgressMilestone < 2) {
+                    lastProgressMilestone = 2;
+                    playAudioFeedback('flashing_progress');
+                } else if (globalPercent >= 50 && lastProgressMilestone < 1) {
+                    lastProgressMilestone = 1;
+                    playAudioFeedback('flashing_progress');
+                } else if (globalPercent >= 25 && lastProgressMilestone < 0) {
+                    lastProgressMilestone = 0;
+                    playAudioFeedback('flashing_progress');
+                }
                 
                 // Only log every 10%
                 if (percent % 10 === 0 && written > 0) {
@@ -732,13 +919,23 @@ async function flashESP32() {
         currentStage = 'done';
         updateProgress(100, 'Flash complete!', 'Firmware written successfully');
         
+        // Audio: Writing complete
+        playAudioFeedback('writing_complete');
+        
         addLog('🎉 Flash completed successfully!', 'success');
+        
         addLog('🔄 Rebooting ESP32...', 'success');
+        
+        // Audio: Rebooting (BEFORE success sound so order is correct in queue)
+        playAudioFeedback('rebooting');
         
         // Step 8: Hard reset
         await esploader.hardReset();
         
         addLog('✅ Your device is ready to use!', 'success');
+        
+        // Play congratulations sound (AFTER reboot is done)
+        playCongratulationsSound();
         addLog('👉 You can disconnect the USB cable', 'info');
         
         // Step 9: Cleanup
@@ -754,6 +951,9 @@ async function flashESP32() {
         
         addLog(`❌ Error: ${error.message}`, 'error');
         console.error('Flash error:', error);
+        
+        // Play error sound with category
+        playErrorSound(error.message);
         
         // Log flash failure to server
         logFlashEvent(
@@ -927,22 +1127,61 @@ function changeLanguage() {
     }
 }
 
+// Setup language selector based on config
+function setupLanguageSelector(languages) {
+    const languageSelect = document.getElementById('languageSelect');
+    const languageSelectorDiv = document.querySelector('.language-selector');
+    
+    if (!languageSelect || !languageSelectorDiv) {
+        return;
+    }
+    
+    // If only one language, hide the selector completely
+    if (languages.length <= 1) {
+        languageSelectorDiv.style.display = 'none';
+        return;
+    }
+    
+    // Clear existing options
+    languageSelect.innerHTML = '';
+    
+    // Add options from config
+    languages.forEach(lang => {
+        const option = document.createElement('option');
+        option.value = lang.code;
+        option.textContent = lang.name;
+        languageSelect.appendChild(option);
+    });
+    
+    // Set selected value
+    languageSelect.value = currentLang;
+    
+    // Show the selector
+    languageSelectorDiv.style.display = 'block';
+}
+
 // Initialize
 async function initialize() {
     // Load page configuration first
     await loadPageConfig();
     
-    // Load both language files
-    await loadTranslations('en');
+    // Load languages from config
+    const languages = pageConfig?.languages || [
+        { code: 'en', name: 'English', default: true }
+    ];
     
-    // Set initial language
-    const savedLang = localStorage.getItem('language') || 'en';
+    // Load all configured language files
+    for (const lang of languages) {
+        await loadTranslations(lang.code);
+    }
+    
+    // Set initial language (from localStorage or default from config)
+    const defaultLang = languages.find(l => l.default)?.code || languages[0].code;
+    const savedLang = localStorage.getItem('language') || defaultLang;
     currentLang = savedLang;
     
-    const languageSelect = document.getElementById('languageSelect');
-    if (languageSelect) {
-        languageSelect.value = savedLang;
-    }
+    // Setup language selector
+    setupLanguageSelector(languages);
     
     // Load project config
     await loadConfig();
@@ -953,11 +1192,24 @@ async function initialize() {
     // Load flash counts and display badges
     loadFlashCounts();
     
-    addLog('Pibot Web Installer ready (ESPLoader.js)', 'success');
+    // Log version info
+    console.log(`%c🚀 ESP32 Web Installer v${WEBINSTALLER_VERSION}`, 'font-weight: bold; font-size: 14px; color: #667eea;');
+    console.log(`%c📅 Build: ${new Date().toISOString().split('T')[0]}`, 'color: #888;');
+    console.log(`%c🌍 Language: ${currentLang}`, 'color: #888;');
+    
+    addLog('ESP32 Web Installer ready (ESPLoader.js)', 'success');
 }
 
 // Start when DOM is ready
 document.addEventListener('DOMContentLoaded', initialize);
+
+// Track first real user click (not programmatic)
+document.addEventListener('click', () => {
+    if (!firstUserInteractionDone) {
+        firstUserInteractionDone = true;
+        console.log('✅ First user interaction detected');
+    }
+}, { capture: true }); // Use capture to catch before other handlers
 
 // ===== BOOT MODAL FUNCTIONS =====
 
@@ -1461,6 +1713,38 @@ function selectProjectByIndex(index) {
         }
         
         // No console spam - user sees disabled card, that's enough
+        return;
+    }
+    
+    // Check browser compatibility - if not supported, treat like disabled project
+    if (!navigator.serial) {
+        // Play error sound ONLY if:
+        // 1. User has actually clicked something (not on automatic selection at page load)
+        // 2. Sound has not been played yet
+        if (firstUserInteractionDone && !browserErrorSoundPlayed) {
+            playAudioFeedback('error_wrong_browser');
+            browserErrorSoundPlayed = true; // Mark as played, won't play again
+        } else if (!firstUserInteractionDone) {
+            // Mark that we need to play sound on first real interaction
+            console.log('%c⚠️ Browser not supported - Web Serial API not available', 'color: #ff5555; font-weight: bold;');
+        }
+        
+        // Don't select project
+        selectedProject = null;
+        
+        // Hide flash section
+        if (flashSection) {
+            flashSection.classList.remove('active');
+        }
+        
+        // Show warning in console
+        const consoleContainer = document.getElementById('consoleContainer');
+        if (consoleContainer) {
+            consoleContainer.innerHTML = '';
+            addLog('⚠️ Browser not supported. Please use Chrome, Edge, or Opera.', 'error');
+            addLog('Web Serial API is required for flashing ESP32 devices.', 'warning');
+        }
+        
         return;
     }
     
